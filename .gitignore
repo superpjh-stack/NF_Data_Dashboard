@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+data/*.sqlite*
+data/*.tmp
+reports/*
+!reports/.gitkeep
+*.log
+.DS_Store
