@@ -1,0 +1,13 @@
+.git
+.venv
+__pycache__
+**/__pycache__
+data
+reports
+.deployment
+.env
+.env.*
+tests
+docs
+*.log
+.DS_Store

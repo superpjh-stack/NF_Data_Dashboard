@@ -1,12 +1,16 @@
 """Local read-only HTTP application. No external services or source modifications."""
 import argparse
+import base64
+import binascii
 import csv
 from functools import lru_cache
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 import io
 import hashlib
+import hmac
 import json
 import mimetypes
+import os
 from pathlib import Path
 import traceback
 from urllib.parse import parse_qs,urlparse,quote
@@ -16,6 +20,19 @@ import eda
 from pipeline import workbook_sheets,json_value,clean
 
 STATIC=Path(__file__).parent/'static'
+
+def authorized(header):
+    user=os.environ.get('DASHBOARD_USER','')
+    password=os.environ.get('DASHBOARD_PASSWORD','')
+    required=os.environ.get('DASHBOARD_AUTH_REQUIRED')=='1' or bool(user or password)
+    if not required:return True
+    if not user or not password:return False
+    try:
+        scheme,token=(header or '').split(' ',1)
+        if scheme.lower()!='basic':return False
+        supplied_user,separator,supplied_password=base64.b64decode(token,validate=True).decode('utf-8').partition(':')
+        return bool(separator) and hmac.compare_digest(supplied_user.encode(),user.encode()) and hmac.compare_digest(supplied_password.encode(),password.encode())
+    except (ValueError,UnicodeError,binascii.Error):return False
 
 @lru_cache(maxsize=40)
 def cached(endpoint,query,stamp):
@@ -28,7 +45,7 @@ def cached(endpoint,query,stamp):
 def source(db,fid):
     f=db.execute('SELECT * FROM files WHERE id=?',(fid,)).fetchone()
     if not f:raise FileNotFoundError('등록되지 않은 원본입니다.')
-    root=Path(a.meta(db)['source_root']).resolve();path=(root/f['path']).resolve()
+    root=Path(os.environ.get('SOURCE_ROOT') or a.meta(db)['source_root']).resolve();path=(root/f['path']).resolve()
     if not path.is_relative_to(root) or not path.is_file():raise FileNotFoundError('원본 경로를 찾을 수 없습니다.')
     return dict(f),path
 
@@ -54,7 +71,9 @@ class Handler(BaseHTTPRequestHandler):
             traceback.print_exc();self.send({'error':'조회에 실패했습니다. 서버 로그를 확인하세요. 원본은 변경되지 않았습니다.'},500)
     def route(self):
         url=urlparse(self.path);path=url.path;p={k:v[0] for k,v in parse_qs(url.query).items()}
-        if path=='/healthz':return self.send({'app':'needsfood-data-dashboard','status':'ok' if a.DB.exists() else 'not_ready'})
+        if path=='/healthz':return self.send({'app':'needsfood-data-dashboard','status':'ok' if a.DB.exists() else 'not_ready'},status=200 if a.DB.exists() else 503)
+        if not authorized(self.headers.get('Authorization')):
+            return self.send({'error':'로그인이 필요합니다.'},401,headers={'WWW-Authenticate':'Basic realm="NeedsFood Dashboard", charset="UTF-8"'})
         if path in ('/','/index.html'):return self.send((STATIC/'index.html').read_bytes(),content_type='text/html; charset=utf-8')
         if path in ('/app.js','/style.css'):
             return self.send((STATIC/path[1:]).read_bytes(),content_type='application/javascript; charset=utf-8' if path.endswith('.js') else 'text/css; charset=utf-8')
@@ -126,8 +145,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send({'error':'찾을 수 없는 경로입니다.'},404)
 
 if __name__=='__main__':
-    parser=argparse.ArgumentParser();parser.add_argument('--port',type=int,default=8770);args=parser.parse_args()
-    server=ThreadingHTTPServer(('127.0.0.1',args.port),Handler)
-    print(f'NeedsFood dashboard: http://127.0.0.1:{args.port}',flush=True)
+    parser=argparse.ArgumentParser();parser.add_argument('--port',type=int,default=8770);parser.add_argument('--host',default='127.0.0.1');args=parser.parse_args()
+    server=ThreadingHTTPServer((args.host,args.port),Handler)
+    print(f'NeedsFood dashboard: http://{args.host}:{args.port}',flush=True)
     try:server.serve_forever()
     except KeyboardInterrupt:server.server_close()
